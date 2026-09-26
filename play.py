@@ -31,8 +31,14 @@ from pathlib import Path
 import requests
 from jericho import FrotzEnv
 
-ACTION_Q = "Which command best makes progress in this adventure?"
+QUESTIONS = {
+    "progress": "Which command best makes progress in this adventure?",
+    "explore": "Which command best makes progress in this text adventure: exploring new places, getting useful items "
+               "or solving a puzzle?",
+    "next": "Which command should the player try next?",
+}
 DANGER_Q = "Is the player in danger?"
+HARNESS_VERSION = "v1"
 MAX_LABELS = 32  # Kodiak's per-question label limit
 STATE_TOKENS = 450  # Kodiak was trained on states up to 512 tokens
 DIRECTIONS = {"n": "north", "s": "south", "e": "east", "w": "west", "ne": "northeast", "nw": "northwest",
@@ -151,6 +157,38 @@ def anti_loop(cands: list[str], tried_here: Counter, tried_in_situation: Counter
     return [c for c in cands if key[c] <= cutoff]
 
 
+EXITS = set(DIRECTIONS.values()) | {"in", "out", "enter", "exit"}
+TAKE_VERBS = ("take", "get", "pick up")
+DROP_VERBS = ("drop", "put down")
+INVERSE_VERBS = [(t, d) for t in TAKE_VERBS for d in DROP_VERBS] + [
+    ("open", "close"), ("lock", "unlock"), ("turn on", "turn off"), ("switch on", "switch off"), ("wear", "remove"),
+    ("wear", "take off"), ("put on", "take off"), ("light", "extinguish"), ("light", "douse"), ("light", "turn off")]
+
+
+def undo_of(prev: str) -> set[str]:
+    """Commands that would just reverse `prev` (open/close, take/drop, put in/take from...), judged from its text."""
+    m = re.fullmatch(r"(?:put|insert|place) (.+?) (?:in|into|inside|on|onto) (.+)", prev)
+    if m:
+        x, y = m.groups()
+        return {f"{v} {x}" for v in TAKE_VERBS} | {f"take {x} from {y}", f"get {x} from {y}", f"take {x} out of {y}"}
+    m = re.fullmatch(r"(?:take|get|remove) (.+?) (?:from|out of|off) (.+)", prev)
+    if m:
+        x, y = m.groups()
+        return {f"put {x} in {y}", f"put {x} into {y}", f"put {x} on {y}", f"insert {x} in {y}", f"drop {x}"}
+    out = set()
+    for a, b in INVERSE_VERBS:
+        for x, y in ((a, b), (b, a)):
+            if prev.startswith(x + " "):
+                out.add(f"{y} {prev[len(x) + 1:]}")
+    m = re.fullmatch(r"put (.+) down", prev)
+    if m:
+        out |= {f"{v} {m.group(1)}" for v in TAKE_VERBS}
+    for v in TAKE_VERBS:
+        if prev.startswith(v + " "):
+            out.add(f"put {prev[len(v) + 1:]} down")
+    return out
+
+
 def chunks(items: list[str], size: int) -> list[list[str]]:
     """Split into the fewest chunks of at most `size`, balanced so no chunk ends up with a single label."""
     n = math.ceil(len(items) / size)
@@ -164,8 +202,9 @@ def chunks(items: list[str], size: int) -> list[list[str]]:
 
 
 def build_state(look: str, inventory: str, history: deque, tried_here: list[str], count_tokens,
-                budget: int = STATE_TOKENS) -> tuple[str, int]:
-    """Room + recent turns + inventory + tried-here, trimmed to the token budget (oldest turns go first)."""
+                progress: str = "", new_exits: list[str] | None = None, budget: int = STATE_TOKENS) -> tuple[str, int]:
+    """Room + recent turns + inventory + progress + what's untried here, trimmed to the token budget (oldest turns go
+    first)."""
     turns = list(history)
     look_chars, obs_chars = 700, 300
     while True:
@@ -173,6 +212,10 @@ def build_state(look: str, inventory: str, history: deque, tried_here: list[str]
         if turns:
             parts.append("Recent turns:\n" + "\n".join(f"> {c}\n{o[:obs_chars]}" for c, o in turns))
         parts.append(f"Inventory: {inventory}")
+        if progress:
+            parts.append(progress)
+        if new_exits:
+            parts.append("Exits not tried from here: " + ", ".join(new_exits))
         if tried_here:
             parts.append("Already tried here: " + ", ".join(tried_here[-8:]))
         text = "\n\n".join(parts)
@@ -203,7 +246,8 @@ def inventory_text(env: FrotzEnv) -> str:
 # ---------------------------------------------------------------------------
 
 
-def ask_kodiak(kodiak, state: str, cands: list[str], options: dict, danger: bool) -> dict:
+def ask_kodiak(kodiak, state: str, cands: list[str], options: dict, danger: bool,
+               question: str = QUESTIONS["explore"]) -> dict:
     """One decision over any number of candidates: a single question if they fit, else a tournament.
 
     Round 1 puts every chunk of <= 32 candidates in one request (one question per chunk, one forward pass) and takes
@@ -214,18 +258,18 @@ def ask_kodiak(kodiak, state: str, cands: list[str], options: dict, danger: bool
     groups = chunks(cands, MAX_LABELS)
     danger_q = [{"type": "choice", "id": "danger", "text": DANGER_Q, "labels": ["yes", "no"]}] if danger else []
     if len(groups) == 1:
-        resp = kodiak.answer(state, [{"type": "choice", "id": "action", "text": ACTION_Q, "labels": cands}] + danger_q,
+        resp = kodiak.answer(state, [{"type": "choice", "id": "action", "text": question, "labels": cands}] + danger_q,
                              options)
         rounds.append(resp["answers"])
         model_ms += resp["latency_ms"]
         final = resp["answers"]["action"]
     else:
-        qs = [{"type": "choice", "id": f"action_{i}", "text": ACTION_Q, "labels": g} for i, g in enumerate(groups)]
+        qs = [{"type": "choice", "id": f"action_{i}", "text": question, "labels": g} for i, g in enumerate(groups)]
         resp = kodiak.answer(state, qs + danger_q, options)
         rounds.append(resp["answers"])
         model_ms += resp["latency_ms"]
         winners = [max(a["probs"], key=a["probs"].get) for q, a in resp["answers"].items() if q.startswith("action_")]
-        resp2 = kodiak.answer(state, [{"type": "choice", "id": "action", "text": ACTION_Q, "labels": winners}], options)
+        resp2 = kodiak.answer(state, [{"type": "choice", "id": "action", "text": question, "labels": winners}], options)
         rounds.append(resp2["answers"])
         model_ms += resp2["latency_ms"]
         final = resp2["answers"]["action"]
@@ -233,10 +277,21 @@ def ask_kodiak(kodiak, state: str, cands: list[str], options: dict, danger: bool
             "roundtrip_ms": (time.perf_counter() - t0) * 1000}
 
 
+USEFUL = re.compile(r"^(take|get|pick up|open|read|examine|unlock|turn on|switch on|light|wear|enter|climb|search|"
+                    r"move|pull|look (in|under|behind))\b")
+ODD = re.compile(r"^(throw|eat|drink|kiss|taste|smell|jump|sing|shout)\b|^push .+ to | at ")
+
+
 def explore(cands: list[str], tried_here: Counter, rng: random.Random) -> tuple[str, str]:
+    """Untried commands in this room, in this order: useful-looking interactions (take, open, read...), exits,
+    anything else, odd ones (throw X at Y...); then a random command. Uses only what a player could see."""
     untried = [c for c in cands if tried_here[c] == 0]
-    if untried:
-        return rng.choice(untried), "untried here"
+    for how, tier in (("untried: useful", [c for c in untried if USEFUL.match(c) and not ODD.search(c)]),
+                      ("untried: exit", [c for c in untried if c in EXITS]),
+                      ("untried", [c for c in untried if not ODD.search(c)]),
+                      ("untried: odd", untried)):
+        if tier:
+            return rng.choice(tier), how
     return rng.choice(cands), "random"
 
 
@@ -327,6 +382,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--threads", type=int, default=8, help="for --in-process: torch CPU threads")
     ap.add_argument("--baseline", action="store_true",
                     help="exploration only: never ask Kodiak (the no-model baseline for benchmarks)")
+    ap.add_argument("--question", choices=sorted(QUESTIONS), default="explore",
+                    help="wording of the action question: " + "; ".join(f"{k} = {v!r}" for k, v in QUESTIONS.items()))
     ap.add_argument("--no-danger", action="store_true", help="don't ask the second question ('Is the player in danger?')")
     ap.add_argument("--llm-model", default=None, help="Ollama model for System 2 (default: exploration only)")
     ap.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
@@ -378,6 +435,8 @@ def main(argv=None) -> dict:
     k_model_ms, k_rt_ms, llm_ms = [], [], []
     start_score, best_score, score = info["score"], info["score"], info["score"]
     episodes = 1
+    max_score = env.get_max_score()
+    prev_cmd, last_points = None, None  # last_points: (points, command, turn)
 
     with transcript.open("w") as out:
         for turn in range(1, a.max_moves + 1):
@@ -390,13 +449,20 @@ def main(argv=None) -> dict:
             valid = env.get_valid_actions()
             all_cands = candidates_from(valid)
             cands = anti_loop(all_cands, here, situation, a.max_repeats)
+            undo = undo_of(prev_cmd) if prev_cmd else set()
+            if len([c for c in cands if c not in undo]) >= 2:  # don't immediately reverse the last move
+                cands = [c for c in cands if c not in undo]
             tried_here = [c for c, _ in here.most_common()]
-            state, n_tokens = build_state(look, inv, history, tried_here, count_tokens)
+            progress = f"Score: {score} of {max_score}. " + (
+                f"Last points: +{last_points[0]} for '{last_points[1]}', {turn - last_points[2]} moves ago."
+                if last_points else "No points scored yet.")
+            new_exits = [c for c in cands if c in EXITS and here[c] == 0]
+            state, n_tokens = build_state(look, inv, history, tried_here, count_tokens, progress, new_exits)
 
             rec: dict = {"turn": turn, "episode": episodes, "location": loc_name, "location_id": loc_id,
                          "score_before": score, "state": state, "state_tokens": n_tokens,
                          "valid_actions": valid, "candidates": cands, "n_candidates": len(cands),
-                         "skipped_repeats": [c for c in all_cands if c not in cands]}
+                         "skipped": [c for c in all_cands if c not in cands]}
 
             if not cands:  # no valid action found at all (rare): "look" is always accepted by the parser
                 cmd, chooser, reason = "look", "forced", "no valid actions listed"
@@ -406,7 +472,7 @@ def main(argv=None) -> dict:
                 cmd, how = explore(cands, here, rng)
                 chooser, reason = "explore", f"baseline; {how}"
             else:
-                k = ask_kodiak(kodiak, state, cands, options, danger=not a.no_danger)
+                k = ask_kodiak(kodiak, state, cands, options, danger=not a.no_danger, question=QUESTIONS[a.question])
                 rec["kodiak"] = k
                 k_model_ms.append(k["model_ms"])
                 k_rt_ms.append(k["roundtrip_ms"])
@@ -441,7 +507,10 @@ def main(argv=None) -> dict:
             obs = clean(obs)
             score = info["score"]
             best_score = max(best_score, score)
-            history.append((cmd, obs))
+            history.append((cmd, obs + (f" [+{reward} points]" if reward > 0 else "")))
+            if reward > 0:
+                last_points = (reward, cmd, turn)
+            prev_cmd = cmd
             rec.update({"command": cmd, "chooser": chooser, "reason": reason, "observation": obs, "reward": reward,
                         "score": score, "game_moves": info["moves"], "done": done})
             out.write(json.dumps(rec) + "\n")
@@ -455,6 +524,7 @@ def main(argv=None) -> dict:
                 obs, info = env.reset()
                 episodes += 1
                 history.clear()
+                prev_cmd = None
                 score = info["score"]
                 if not a.quiet:
                     print(view.c("  (restarting the game)", "2"))
@@ -468,8 +538,9 @@ def main(argv=None) -> dict:
     summary = {
         "game": game, "model": model_name, "threshold": a.threshold, "seed": a.seed,
         "system2": f"llm:{a.llm_model}" if a.llm_model else "exploration",
+        "harness": HARNESS_VERSION, "question": a.question, "max_repeats": a.max_repeats,
         "moves": moves, "episodes": episodes, "game_overs": stats["game_overs"],
-        "score": {"start": start_score, "final": score, "best": best_score, "max_possible": env.get_max_score()},
+        "score": {"start": start_score, "final": score, "best": best_score, "max_possible": max_score},
         "rooms_visited": len(rooms), "rooms": sorted(rooms),
         "decided_by": {k: {"moves": stats[k], "pct": pct(stats[k])} for k in ("kodiak", "explore", "llm", "forced")},
         "kodiak_asked": asked,
