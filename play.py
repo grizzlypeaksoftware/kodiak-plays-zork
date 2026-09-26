@@ -117,6 +117,13 @@ def peek(env: FrotzEnv, command: str) -> str:
     return clean(obs)
 
 
+def valid_actions(env: FrotzEnv) -> list[str]:
+    """Jericho's valid-action search, serial. Some commands halt the emulator (e.g. "drop all down nest" at one point
+    in Zork I); the serial search recovers from that, while Jericho's parallel search can hang or crash on it. Serial
+    costs ~0.05 s per turn."""
+    return env.get_valid_actions(use_parallel=False)
+
+
 def location(env: FrotzEnv) -> tuple[int, str]:
     loc = env.get_player_location()
     return (loc.num, loc.name) if loc is not None else (-1, "(unknown)")
@@ -446,7 +453,7 @@ def main(argv=None) -> dict:
             situation = tried_state.setdefault(env.get_world_state_hash(), Counter())
             look = peek(env, "look")
             inv = inventory_text(env)
-            valid = env.get_valid_actions()
+            valid = valid_actions(env)
             all_cands = candidates_from(valid)
             cands = anti_loop(all_cands, here, situation, a.max_repeats)
             undo = undo_of(prev_cmd) if prev_cmd else set()

@@ -43,15 +43,21 @@ def start_server(model: str, port: int, device: str, threads: int, log: Path) ->
     sys.exit(f"server for {model} didn't come up in 300 s; see {log}")
 
 
-def play(game: str, seed: int, out: Path, a: argparse.Namespace, url: str | None) -> dict:
+def play(game: str, seed: int, out: Path, a: argparse.Namespace, url: str | None) -> dict | None:
     transcript = out / f"{Path(game).stem}-s{seed}.jsonl"
     cmd = [sys.executable, str(HERE / "play.py"), "--game", game, "--seed", str(seed), "--max-moves", str(a.max_moves),
            "--threshold", str(a.threshold), "--quiet", "--no-color", "--transcript", str(transcript)]
     cmd += ["--kodiak-url", url] if url else ["--baseline"]
     cmd += a.play_args
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=a.run_timeout)
+    except subprocess.TimeoutExpired:
+        print(f"  ! {Path(game).stem} seed {seed} timed out after {a.run_timeout:.0f} s; left out of the table", flush=True)
+        return None
     if r.returncode != 0:
-        sys.exit(f"play.py failed on {game} seed {seed}:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+        print(f"  ! {Path(game).stem} seed {seed} failed (exit {r.returncode}); left out of the table\n"
+              f"{r.stdout[-1500:]}\n{r.stderr[-1500:]}", flush=True)
+        return None
     return json.loads(transcript.with_name(transcript.stem + "-summary.json").read_text())
 
 
@@ -74,7 +80,7 @@ def table(results: dict[str, dict[str, list[dict]]]) -> str:
             lat = [r["kodiak_latency_ms"]["model_avg"] for r in runs if r["kodiak_latency_ms"]["model_avg"] is not None]
             overs = [r["game_overs"] for r in runs]
             invalid = sum(r["invalid_commands"] for r in runs)
-            rows.append(f"| {config} | {game} (max {runs[0]['score']['max_possible']}) | {fmt(gain)} | {fmt(best)} | "
+            rows.append(f"| {config} | {game} (max {runs[0]['score']['max_possible']}, n={len(runs)}) | {fmt(gain)} | {fmt(best)} | "
                         f"{fmt(rooms)} | {fmt(share) + '%' if lat else '–'} | {fmt(lat, 0) if lat else '–'} | "
                         f"{fmt(overs)} | {invalid} |")
     return "\n".join(rows)
@@ -92,6 +98,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--port", type=int, default=8766)
+    ap.add_argument("--run-timeout", type=float, default=900, help="seconds before one play.py run is abandoned")
     ap.add_argument("--out", default=None, help="default runs/bench-<time>")
     ap.add_argument("--play-args", nargs=argparse.REMAINDER, default=[],
                     help="anything after this is passed to every play.py run (e.g. --play-args --no-danger)")
@@ -109,6 +116,7 @@ def main() -> None:
     configs += [(Path(m).name, m, None) for m in a.model]
 
     results: dict[str, dict[str, list[dict]]] = {}
+    failures: list[str] = []
     for label, model, url in configs:
         folder = out / label.split(" ")[0]
         folder.mkdir(exist_ok=True)
@@ -122,6 +130,9 @@ def main() -> None:
                 for seed in a.seeds:
                     t0 = time.perf_counter()
                     s = play(game, seed, folder, a, url)
+                    if s is None:
+                        failures.append(f"{label}/{Path(game).stem}/seed {seed}")
+                        continue
                     results.setdefault(label, {}).setdefault(Path(game).stem, []).append(s)
                     print(f"[{label}] {Path(game).stem} seed {seed}: score {s['score']['start']}→{s['score']['best']}, "
                           f"rooms {s['rooms_visited']}, kodiak {s['decided_by']['kodiak']['pct']}%, "
@@ -133,9 +144,11 @@ def main() -> None:
 
     md = table(results)
     header = (f"{len(a.seeds)} seeds × {a.max_moves} moves, threshold {a.threshold}, "
-              f"extra play.py args: {' '.join(a.play_args) or 'none'}")
+              f"extra play.py args: {' '.join(a.play_args) or 'none'}"
+              + (f"\n\nFailed or timed-out runs (not in the table): {', '.join(failures)}" if failures else ""))
     (out / "results.md").write_text(f"{header}\n\n{md}\n")
-    (out / "results.json").write_text(json.dumps({"args": vars(a), "results": results}, indent=1) + "\n")
+    (out / "results.json").write_text(json.dumps({"args": vars(a), "results": results, "failures": failures},
+                                                 indent=1) + "\n")
     print(f"\n{header}\n\n{md}\n\nsaved to {out}/results.md")
 
 
