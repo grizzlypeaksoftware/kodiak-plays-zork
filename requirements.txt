@@ -1,0 +1,8 @@
+# Kodiak (Apache-2.0), pinned to the commit this demo was built against.
+kodiak-s1[infer] @ git+https://github.com/grizzlypeaksoftware/kodiak@468aefab2900abc368643f76b46dfe59fe54e5c2
+# Jericho (GPL-2.0) is used as an installed dependency only; no Jericho code is copied into this demo.
+jericho==3.3.1
+# Jericho also needs spaCy's English model:  python -m spacy download en_core_web_sm
+fastapi>=0.110
+uvicorn>=0.29
+requests>=2.31

@@ -1,0 +1,61 @@
+{
+  "game": "advent",
+  "model": "cortex-agent-llc/kodiak-small-r1-preview @ http://127.0.0.1:8765 (cpu)",
+  "threshold": 0.5,
+  "seed": 0,
+  "system2": "exploration",
+  "moves": 100,
+  "episodes": 1,
+  "game_overs": 0,
+  "score": {
+    "start": 36,
+    "final": 36,
+    "best": 36,
+    "max_possible": 350
+  },
+  "rooms_visited": 7,
+  "rooms": [
+    "At End Of Road",
+    "At Hill In Road",
+    "At Slit In Streambed",
+    "In A Valley",
+    "In Forest",
+    "Inside Building",
+    "Outside Grate"
+  ],
+  "decided_by": {
+    "kodiak": {
+      "moves": 43,
+      "pct": 43.0
+    },
+    "explore": {
+      "moves": 57,
+      "pct": 57.0
+    },
+    "llm": {
+      "moves": 0,
+      "pct": 0.0
+    },
+    "forced": {
+      "moves": 0,
+      "pct": 0.0
+    }
+  },
+  "kodiak_asked": 100,
+  "kodiak_abstentions": {
+    "total": 2,
+    "unanswerable": 2,
+    "low_confidence": 0
+  },
+  "kodiak_below_threshold": 55,
+  "kodiak_latency_ms": {
+    "model_avg": 198.7,
+    "roundtrip_avg": 203.6,
+    "roundtrip_p50": 186.7
+  },
+  "llm_latency_ms_avg": null,
+  "llm_latency_ms_p50": null,
+  "llm_errors": 0,
+  "invalid_commands": 0,
+  "transcript": "runs/advent-100-cpu.jsonl"
+}

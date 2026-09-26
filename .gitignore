@@ -1,0 +1,33 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and credentials: never commit these
+.env
+.env.*
+.git-credentials
+*.pem
+*.key
+.netrc
+.hf_token
+secrets*
+credentials*
+
+# Local model and cache folders
+.cache/
+hf_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+
+# Game files are never committed: see README "Game files".
+games/*.z[1-8]
+games/*.zblorb
+
+# Run outputs: only the reference run is committed
+runs/*
+!runs/advent-100-cpu*
