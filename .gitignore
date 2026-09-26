@@ -28,6 +28,5 @@ hf_cache/
 games/*.z[1-8]
 games/*.zblorb
 
-# Run outputs: only the reference run is committed
-runs/*
-!runs/advent-100-cpu*
+# Run outputs (transcripts, summaries, benchmarks) stay local
+runs/

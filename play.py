@@ -325,6 +325,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--model", default="cortex-agent-llc/kodiak-small-r1-preview", help="for --in-process")
     ap.add_argument("--device", default="cpu", help="for --in-process: cpu, cuda or auto (default cpu)")
     ap.add_argument("--threads", type=int, default=8, help="for --in-process: torch CPU threads")
+    ap.add_argument("--baseline", action="store_true",
+                    help="exploration only: never ask Kodiak (the no-model baseline for benchmarks)")
     ap.add_argument("--no-danger", action="store_true", help="don't ask the second question ('Is the player in danger?')")
     ap.add_argument("--llm-model", default=None, help="Ollama model for System 2 (default: exploration only)")
     ap.add_argument("--ollama-url", default=os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434"),
@@ -346,7 +348,11 @@ def main(argv=None) -> dict:
     rng = random.Random(a.seed)
     count_tokens = token_counter()
 
-    kodiak = KodiakLocal(a.model, a.device, a.threads) if a.in_process else KodiakHTTP(a.kodiak_url)
+    if a.baseline:
+        kodiak = None
+    else:
+        kodiak = KodiakLocal(a.model, a.device, a.threads) if a.in_process else KodiakHTTP(a.kodiak_url)
+    model_name = "none (baseline: exploration only)" if kodiak is None else kodiak.name
     options = {} if a.null_threshold is None else {"null_threshold": a.null_threshold}
 
     env = FrotzEnv(a.game, seed=a.seed)
@@ -360,7 +366,7 @@ def main(argv=None) -> dict:
     transcript.parent.mkdir(parents=True, exist_ok=True)
 
     if not a.quiet:
-        print(view.c(f"Kodiak plays {game}  |  {kodiak.name}  |  threshold {a.threshold}"
+        print(view.c(f"Kodiak plays {game}  |  {model_name}  |  threshold {a.threshold}"
                      f"  |  System 2: {'LLM ' + a.llm_model if a.llm_model else 'exploration'}", "1"))
         print(clean(obs))
 
@@ -396,6 +402,9 @@ def main(argv=None) -> dict:
                 cmd, chooser, reason = "look", "forced", "no valid actions listed"
             elif len(cands) == 1:
                 cmd, chooser, reason = cands[0], "forced", "only one valid action"
+            elif kodiak is None:
+                cmd, how = explore(cands, here, rng)
+                chooser, reason = "explore", f"baseline; {how}"
             else:
                 k = ask_kodiak(kodiak, state, cands, options, danger=not a.no_danger)
                 rec["kodiak"] = k
@@ -457,7 +466,7 @@ def main(argv=None) -> dict:
         return round(100 * n / moves, 1) if moves else 0.0
 
     summary = {
-        "game": game, "model": kodiak.name, "threshold": a.threshold, "seed": a.seed,
+        "game": game, "model": model_name, "threshold": a.threshold, "seed": a.seed,
         "system2": f"llm:{a.llm_model}" if a.llm_model else "exploration",
         "moves": moves, "episodes": episodes, "game_overs": stats["game_overs"],
         "score": {"start": start_score, "final": score, "best": best_score, "max_possible": env.get_max_score()},

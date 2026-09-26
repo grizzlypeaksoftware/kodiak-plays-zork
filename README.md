@@ -50,12 +50,22 @@ knows (matched by MD5)**, so the file has to be the right one:
 
 | Game | File | MD5 | Source |
 |---|---|---|---|
-| Zork I | `games/zork1.z5` | `b732a93a6244ddd92a9b9a3e3a46c687` | Your own legitimately obtained copy (e.g. from a purchased Infocom collection). Don't download it from unofficial sites. |
+| Zork I | `games/zork1.z3` | `b732a93a6244ddd92a9b9a3e3a46c687` | Your own legitimately obtained copy (e.g. from a purchased Infocom collection). Don't download it from unofficial sites. |
+| Zork II | `games/zork2.z3` | `5bcd91ee055e9bd42812617571be227b` | Same |
+| Zork III | `games/zork3.z3` | `ffda9ee2d428fa2fa8e75a1914ff6959` | Same |
 | Adventure (Inform port by Graham Nelson) | `games/advent.z5` | `ee2242e155fd8910921b0f8e04019a3a` | Freely distributable: `https://ifarchive.org/if-archive/games/zcode/Advent.z5` |
 | 9:05 (Adam Cadre) | `games/905.z5` | `4c5067169b834d247a30bb08d1039896` | Freely distributable: `https://ifarchive.org/if-archive/games/zcode/905.z5` |
 
 Microsoft's 2025 MIT-licensed release of the Zork source doesn't help here: a build from that source has a different MD5,
 so Jericho treats it as unsupported and can't list valid actions. `play.py` refuses to start on an unsupported file.
+
+**The extension doesn't matter; the MD5 does.** Jericho's docs call the Zork I file `zork1.z5`, but the supported build is a
+version-3 story file that Infocom collections usually ship as `zork1.z3`. Other Infocom files from the same collection
+(Zork Zero, Beyond Zork, Planetfall) are builds Jericho doesn't know, so they won't work. Check a file with:
+
+```bash
+python -c "import hashlib,sys; from jericho import defines; h=hashlib.md5(open(sys.argv[1],'rb').read()).hexdigest(); print(h, defines.BINDINGS_DICT.get(h, {}).get('name', 'NOT SUPPORTED'))" games/zork1.z3
+```
 
 ```bash
 mkdir -p games
@@ -91,8 +101,8 @@ Kodiak's Response: `{"model", "latency_ms", "answers": {id: {"answer", "confiden
 ```bash
 python server.py &
 python play.py --game games/advent.z5 --max-moves 100
-python play.py --game games/zork1.z5  --max-moves 100
-python play.py --game games/zork1.z5  --llm-model qwen3:30b-a3b     # System 2 = a local LLM via Ollama
+python play.py --game games/zork1.z3  --max-moves 100
+python play.py --game games/zork1.z3  --llm-model qwen3:30b-a3b     # System 2 = a local LLM via Ollama
 ```
 
 | Flag | Default | Meaning |
@@ -137,9 +147,30 @@ score.
 
 ## Results
 
-### Adventure, 100 moves, CPU (reference run: `runs/advent-100-cpu*`)
+Both runs: Kodiak served by `server.py` on CPU (8 threads), System 2 = exploration, threshold 0.5, seed 0.
 
-Kodiak served by `server.py` on CPU (8 threads), System 2 = exploration, threshold 0.5, seed 0.
+### Zork I, 100 moves, CPU (`runs/zork1-100-cpu*`)
+
+| | |
+|---|---|
+| Moves | 100 (0 game overs) |
+| Score | 0 → **5** (max 350) |
+| Rooms visited | 9 (West/North/South of House, Behind House, Forest, Forest Path, Clearing, Canyon View, Up a Tree) |
+| Decided by | **Kodiak 40 (40%)**, exploration 58 (58%), LLM 0, forced 2 (2%) |
+| Kodiak | asked 98 times; abstained 0; below the 0.5 threshold 58 |
+| Kodiak latency | 204 ms average model time, 208 ms round trip (p50 203 ms) |
+| Danger question | "yes" 41 times, "no" 57 |
+| States | at most 304 tokens; at most 14 candidates per turn (no tournament was needed) |
+| **Invalid moves** | **0** |
+
+Kodiak's opening move was "west" (0.80), not "open mailbox". It then spent most of the game circling the forest around
+the house ("go around forest", "go around trees"). The only points came from **exploration**: it climbed the tree and took
+the jewel-encrusted egg (+5). After that, both deciders fiddled with the egg, nest and canary for ~40 moves. Exploration
+also opened the kitchen window but closed it again on the next move, so the run never got into the house, and never
+reached the lamp, the trapdoor or the underground. That's the expected level for this preview. The point of the run is the
+last row.
+
+### Adventure, 100 moves, CPU (`runs/advent-100-cpu*`)
 
 | | |
 |---|---|
@@ -161,13 +192,6 @@ isn't the same as good play**.
 A 12-move check with `--llm-model qwen3:30b-a3b` split the moves 5 Kodiak / 7 LLM, with 0 invalid moves. The LLM took
 ~0.9 s per move once loaded, against ~0.2 s for Kodiak on CPU.
 
-### Zork I, 100 moves
-
-*Pending: needs a legitimately obtained `games/zork1.z5` (see [Game files](#game-files)).* Run:
-
-```bash
-python play.py --game games/zork1.z5 --max-moves 100 --transcript runs/zork1-100-cpu.jsonl
-```
 
 ## Latency
 
@@ -202,9 +226,10 @@ danger -> no conf 0.86, p_null 0.03, top: no 0.86, yes 0.12
    "say fee" / "say fie" / "say foe" (magic words that change the game state, so Jericho lists them as valid). Confidence is
    calibrated on Kodiak's own eval tasks, not on "does this move make progress in a game", so it isn't a quality signal here.
    The demo handles loops outside the model; the magic-word loop survives because each "say" really changes the state.
-3. **Rarely abstains.** p_null was near 0 on almost every turn (2 abstentions in 100). Low-confidence turns, not abstentions,
+3. **Rarely abstains.** p_null was near 0 on almost every turn (2 abstentions in 100 on Adventure, 0 in 98 on Zork). Low-confidence turns, not abstentions,
    drive the cascade.
-4. **The danger question has false positives.** It said "yes" 16 times in 100 on Adventure's harmless surface.
+4. **The danger question has false positives.** It said "yes" 16 times in 100 on Adventure's harmless surface, and 41 in 98 in Zork's forest,
+   where nothing can hurt you.
 5. **API constraints to design around** (behavior, not bugs): a choice question needs 2–32 labels, so a single valid
    command is a "forced" move and more than 32 need a tournament; `confidence` is `(1 − p_null) × P(label)`; in a
    tournament, the final confidence is relative to the finalists only, so it's higher than a single-round confidence would be.
