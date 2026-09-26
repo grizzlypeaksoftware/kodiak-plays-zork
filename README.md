@@ -15,8 +15,10 @@ What the demo shows:
 4. **An honest benchmark.** The same games and seeds, with and without the model, so a new Kodiak version can be compared
    against this one and against a no-model baseline.
 
-**Set expectations.** Kodiak is a *public research preview*, and the benchmark says plainly how it plays: with harness v1
-it clearly helps on one game (Detective), roughly ties on three, and **hurts on Zork I** compared with exploration alone.
+**Set expectations.** Kodiak is a *public research preview*, and the benchmark says plainly how it plays. With harness v1,
+the r1 preview clearly helps on one game (Detective), roughly ties on three, and **hurts on Zork I** compared with
+exploration alone. The v2 preview scores best on Zork I, but its own moves earn almost nothing and it gets stuck on
+Detective (see [r1 vs v2](#model-comparison-r1-preview-vs-v2-preview)).
 Zork is hard even for large LLMs. The goal here isn't to beat the game; it's to show the cascade and the "never off the
 menu" property, and to measure the model honestly.
 
@@ -208,6 +210,44 @@ threshold 0.5, 100 moves per game, seeds 0–4, mean ± sd over the 5 seeds. **0
 | Adventure (350) | 0 | 0 | 6.8 ± 0.4 | 6.8 ± 0.4 | 16% | 246 |
 
 (Adventure starts at 36 points and 100 moves isn't enough to earn more; Detective starts at 10.)
+
+### Model comparison: r1-preview vs v2-preview
+
+Same frozen harness (v1), games and seeds; only the model differs.
+[`kodiak-small-v2-preview`](https://huggingface.co/cortex-agent-llc/kodiak-small-v2-preview) was benchmarked while a
+training job was running on the same machine, so don't read anything into latency differences (the model times were
+similar: 240–360 ms).
+
+| Points gained | Baseline | r1-preview | v2-preview |
+|---|---|---|---|
+| **Zork I** | 13.0 ± 2.7 | 6.0 ± 5.5 | **21.4 ± 18.0** (per seed: 10, 42, 10, 5, 40) |
+| **Detective** | 92 ± 28 | **178 ± 113** | 10 ± 0 (stuck in all 5 seeds) |
+| Library | 12.4 ± 0.9 | **12.8 ± 1.8** | 9.0 ± 2.7 |
+| Balances | 10.0 | 9.0 ± 2.2 | 10.0 |
+| Adventure | 0 | 0 | 0 |
+
+| Model behavior | r1-preview | v2-preview |
+|---|---|---|
+| Share of moves made by the model | 25% | **53%** |
+| Points per 100 of the model's own moves, all games | **68.4** | 1.7 |
+| Points per 100 of the model's own moves, Zork I | 0.0 (88 moves) | 1.3 (157 moves) |
+| Points per 100 exploration moves, Zork I | 7.4 | **32.4** |
+| Abstentions | 3 | 0 |
+| Danger question says "yes" | 27% of turns | **75%** of turns |
+| Rooms visited, Zork I | 10.0 | **11.2** |
+
+**Reading it.**
+
+- **v2 is more confident** and makes twice the share of moves, but its own moves earn almost nothing (2 points on Zork I, from
+  putting the egg in the trophy case).
+- **Its Zork I lead comes from two seeds** where the exploration fallback got into the house and down to the cellar (+25). The
+  median seed scored 10, below the baseline's 15. v2's moves did steer the game somewhere exploration could score (32
+  points per 100 exploration moves, against 7 with r1), but with 5 seeds and this spread, it's not a clear win.
+- **Detective shows the risk of confidence without judgment.** After taking the paper (+10), v2 walks outside and then
+  cycles "north" (which fails), "put paper down" and "take paper" for 95 moves at confidence 0.5–0.8. The only real exit
+  ("west") is in the candidates on every turn and listed in the state as an untried exit; v2 never picks it, and because
+  it's confident, the fallback never gets a turn. The model is deterministic, so all 5 seeds end the same way.
+- **The danger question got worse** ("yes" on three-quarters of turns).
 
 ### Harness v0 (the first version, for reference)
 
