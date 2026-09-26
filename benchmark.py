@@ -47,7 +47,10 @@ def play(game: str, seed: int, out: Path, a: argparse.Namespace, url: str | None
     transcript = out / f"{Path(game).stem}-s{seed}.jsonl"
     cmd = [sys.executable, str(HERE / "play.py"), "--game", game, "--seed", str(seed), "--max-moves", str(a.max_moves),
            "--threshold", str(a.threshold), "--quiet", "--no-color", "--transcript", str(transcript)]
-    cmd += ["--kodiak-url", url] if url else ["--baseline"]
+    if url == "jev":
+        cmd += ["--backend", "jev", "--jev-model", a.jev_model] + (["--env-file", a.env_file] if a.env_file else [])
+    else:
+        cmd += ["--kodiak-url", url] if url else ["--baseline"]
     cmd += a.play_args
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=a.run_timeout)
@@ -93,6 +96,9 @@ def main() -> None:
     ap.add_argument("--model", action="append", default=[], help="Hugging Face repo id or local folder; repeatable")
     ap.add_argument("--kodiak-url", default=None, help="use an already-running server instead of starting one per model")
     ap.add_argument("--baseline", action="store_true", help="also run the exploration-only baseline")
+    ap.add_argument("--jev", action="store_true", help="also run TypeSafe's Jev API as the System 1 model")
+    ap.add_argument("--jev-model", default="jev-latest")
+    ap.add_argument("--env-file", default=None, help="env file holding the Jev key (TYPESAFE_API_KEY or JEV-KEY)")
     ap.add_argument("--max-moves", type=int, default=100)
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--device", default="cpu")
@@ -103,8 +109,8 @@ def main() -> None:
     ap.add_argument("--play-args", nargs=argparse.REMAINDER, default=[],
                     help="anything after this is passed to every play.py run (e.g. --play-args --no-danger)")
     a = ap.parse_args()
-    if not (a.model or a.kodiak_url or a.baseline):
-        ap.error("give at least one --model, --kodiak-url or --baseline")
+    if not (a.model or a.kodiak_url or a.baseline or a.jev):
+        ap.error("give at least one --model, --kodiak-url, --jev or --baseline")
 
     out = Path(a.out or HERE / "runs" / f"bench-{datetime.now():%Y%m%d-%H%M%S}")
     out.mkdir(parents=True, exist_ok=True)
@@ -114,6 +120,8 @@ def main() -> None:
     if a.kodiak_url:
         configs.append((f"server {a.kodiak_url}", None, a.kodiak_url))
     configs += [(Path(m).name, m, None) for m in a.model]
+    if a.jev:
+        configs.append((a.jev_model, None, "jev"))
 
     results: dict[str, dict[str, list[dict]]] = {}
     failures: list[str] = []

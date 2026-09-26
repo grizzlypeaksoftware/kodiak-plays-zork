@@ -124,6 +124,7 @@ python play.py --game games/zork1.z3 --llm-model qwen3:30b-a3b       # System 2 
 | `--ollama-url` | `$OLLAMA_HOST` or `http://127.0.0.1:11434` | Ollama endpoint (from the environment; no secrets in code) |
 | `--kodiak-url` | `$KODIAK_URL` or `http://127.0.0.1:8765` | The server from `server.py` |
 | `--in-process` / `--model` / `--device` / `--threads` | off / preview / cpu / 8 | Load Kodiak in the game process instead |
+| `--backend jev` / `--jev-model` / `--env-file` | kodiak / jev-latest / none | Use TypeSafe's Jev API as System 1; key from `$TYPESAFE_API_KEY` or `$JEV-KEY`, optionally loaded from an env file (never printed) |
 | `--seed` | 0 | Game RNG and exploration seed |
 | `--no-danger` | off | Don't ask the second question ("Is the player in danger?") |
 | `--stop-on-death` | off | Stop at game over (default: restart and keep counting moves) |
@@ -173,6 +174,9 @@ G=games
 # the reference protocol: 5 games x 5 seeds x 100 moves, baseline + the preview model
 python benchmark.py --baseline --model cortex-agent-llc/kodiak-small-r1-preview \
   --games $G/advent.z5 $G/balances.z5 $G/detective.z5 $G/library.z5 $G/zork1.z3 --seeds 0 1 2 3 4
+
+# Jev on Zork I (API key from an env file; each move is one API call)
+python benchmark.py --jev --env-file path/to/.env --games $G/zork1.z3 --seeds 0 1 2 3 4
 
 # a new model against the preview, same protocol
 python benchmark.py --baseline --model cortex-agent-llc/kodiak-small-r1-preview --model ./kodiak-v2 \
@@ -248,6 +252,59 @@ similar: 240–360 ms).
   ("west") is in the candidates on every turn and listed in the state as an untried exit; v2 never picks it, and because
   it's confident, the fallback never gets a turn. The model is deterministic, so all 5 seeds end the same way.
 - **The danger question got worse** ("yes" on three-quarters of turns).
+
+### Kodiak vs Jev (Zork I)
+
+[Jev](https://typesafe.ai) is TypeSafe AI's closed "System One" decision model, the model that inspired Kodiak. `play.py
+--backend jev` calls its API (`POST /v1/systemone`) with the same states, candidates and question wording; the yes/no
+danger question uses Jev's native yes/no type. Jev has no abstention, so its cascade runs on confidence alone, against the
+same 0.5 threshold. Same frozen harness (v1), Zork I, seeds 0–4, 100 moves.
+
+| Zork I, 5 seeds | Baseline | Kodiak r1-preview | Kodiak v2-preview | Jev (`jev-latest`) |
+|---|---|---|---|---|
+| Points gained (per seed) | 15, 15, 15, 10, 10 | 10, 10, 0, 0, 10 | 10, 42, 10, 5, 40 | 10, 15, 10, 10, 10 |
+| **Points gained, mean ± sd** | 13.0 ± 2.7 | 6.0 ± 5.5 | **21.4 ± 18.0** | 11.0 ± 2.2 |
+| Rooms visited | 10.2 | 10.0 | 11.2 | **12.2** |
+| Deaths (5 games) | 0 | 1 | 1 | 3 |
+| Share of moves made by the model | – | 18% | 31% | **50%** |
+| Points earned by the model's own moves | – | 0 (in 88 moves) | 2 (in 157) | **45 (in 252)** |
+| Median confidence of the model's pick | – | 0.32 | 0.37 | 0.51 |
+| Danger question says "yes" | – | 13% | 60% | 4% |
+| Latency per decision (p50) | – | 275 ms, local CPU | 301 ms, local CPU | 133 ms, network API |
+| Cost | free | free (local) | free (local) | 499 calls, 272k input + 59k output tokens |
+| **Invalid moves** | 0 | 0 | 0 | **0** |
+
+**Same position, different picks.** Every one of Jev's 498 decision positions was replayed offline through both Kodiak
+models (identical state, candidates and question):
+
+| | Agrees with Jev's pick | Confident (≥ 0.5) |
+|---|---|---|
+| Jev | – | 51% of positions |
+| Kodiak r1-preview | 23% | 32% |
+| Kodiak v2-preview | 19% | 46% |
+| (r1 vs v2) | 60% with each other | |
+
+| Position | Jev | Kodiak r1 | Kodiak v2 |
+|---|---|---|---|
+| West of House, move 1 | **open mailbox** (0.78) | west (0.66) | west (0.42) |
+| Behind House, window open (5 games) | **west**, into the kitchen, 0.43–0.66 | close window, 0.30–0.40 (all 5) | west twice, "put down …" 3× (0.24–0.33) |
+| Dark attic, "likely to be eaten by a grue" | north (the fatal move) | north, 0.09–0.13 | north once, other moves twice (≤ 0.24) |
+
+**Reading it.**
+
+- **Jev plays Zork more sensibly move by move.** It opens the mailbox, climbs in through the kitchen window on its own
+  (4 of 5 games), explores the most rooms, and its own moves earned 45 points where Kodiak's earned 0–2. Its danger answer
+  is also far better calibrated here (4% "yes").
+- **But it didn't score more than exploration alone** (11.0 vs 13.0), because it went up into the dark attic and walked
+  into the grue in 3 of 5 games: each death costs 10 points and restarts the game. In every one of those deaths, **Jev's
+  own danger answer said "yes" at 0.94–0.95** in the same forward pass that chose "north". The harness logs the danger
+  answer but doesn't act on it; using it as a veto ("in danger → don't move into the dark, escalate") is the obvious next
+  harness change, for every model.
+- **Kodiak r1 knows less but hurts less on Zork:** it rarely commits (32% confident), so exploration carries most turns. Its
+  pick behind the house is "close window" every time, the opposite of the key move.
+- **Kodiak v2's best score comes from exploration**, as noted above; head to head it agrees with Jev least (19%).
+- **Speed and cost:** Jev answered in ~130 ms over the network; Kodiak takes ~300 ms on this Arm CPU (~17 ms on a GPU),
+  runs locally, and costs nothing per call.
 
 ### Harness v0 (the first version, for reference)
 

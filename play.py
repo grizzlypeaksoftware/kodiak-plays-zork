@@ -88,6 +88,67 @@ class KodiakLocal:
         return self.kodiak.answer([{"state": state, "questions": questions, "options": options}])[0]
 
 
+class JevHTTP:
+    """TypeSafe's Jev (a closed System One model) behind the same interface, for comparison.
+
+    Kodiak-style choice questions become Jev choice questions (labels as undescribed criteria); a yes/no question
+    becomes Jev's native "noul" question. Jev has no abstention, so p_null is always 0 and the cascade runs on its
+    confidence alone. The key comes from $TYPESAFE_API_KEY or $JEV-KEY (see --env-file); it is never logged.
+    """
+
+    URL = "https://api.typesafe.ai/v1/systemone"
+
+    def __init__(self, model: str):
+        key = os.environ.get("TYPESAFE_API_KEY") or os.environ.get("JEV-KEY")
+        if not key:
+            sys.exit("No Jev key: set TYPESAFE_API_KEY (or JEV-KEY), e.g. with --env-file path/to/.env")
+        self.model = model
+        self.name = f"{model} (TypeSafe API)"
+        self.session = requests.Session()
+        self.session.headers["Authorization"] = f"Bearer {key}"
+        self.usage = Counter()
+
+    def answer(self, state, questions: list[dict], options: dict) -> dict:
+        yes_no = {q["id"] for q in questions if sorted(q["labels"]) == ["no", "yes"]}
+        body = {"model": self.model, "state": state, "questions": {
+            q["id"]: ({"type": "noul", "instructions": q["text"]} if q["id"] in yes_no else
+                      {"type": "choice", "instructions": q["text"], "criteria": {lab: None for lab in q["labels"]}})
+            for q in questions}}
+        t0 = time.perf_counter()
+        for attempt in range(4):
+            r = self.session.post(self.URL, json=body, timeout=60)
+            if r.status_code not in (408, 429) and r.status_code < 500:
+                break
+            time.sleep(2 ** attempt)
+        if r.status_code != 200:
+            raise RuntimeError(f"Jev API error {r.status_code}: {r.text[:300]}")
+        ms = (time.perf_counter() - t0) * 1000
+        data = r.json()
+        self.usage.update({k: v for k, v in data.get("usage", {}).items() if isinstance(v, int)})
+        self.usage["calls"] += 1
+        answers = {}
+        for qid, a in data["answers"].items():
+            if a["type"] == "noul":
+                p = float(a["noul"])
+                probs = {"yes": p, "no": 1 - p}
+            else:
+                probs = {k: float(v) for k, v in a["probabilities"].items()}
+            best = a.get("choice") or max(probs, key=probs.get)
+            conf = float(a.get("confidence", probs[best]))
+            answers[qid] = {"type": "choice", "answer": best, "confidence": conf, "probs": probs, "p_null": 0.0,
+                            "abstain_reason": None}
+        return {"model": data.get("model", self.model), "latency_ms": ms, "answers": answers}
+
+
+def load_env_file(path: str) -> None:
+    """Load KEY=VALUE lines into the environment (names may contain hyphens, like JEV-KEY). Values are never printed."""
+    for line in Path(path).expanduser().read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip().removeprefix("export ").strip(), v.strip().strip("'\""))
+
+
 def token_counter():
     """Kodiak's own tokenizer when available (it is installed with kodiak-s1), else ~4 characters per token."""
     try:
@@ -383,8 +444,8 @@ def ask_llm(model: str, host: str, state: str, cands: list[str], timeout: float)
 
 
 class View:
-    def __init__(self, color: bool, quiet: bool, text_lines: int):
-        self.color, self.quiet, self.text_lines = color, quiet, text_lines
+    def __init__(self, color: bool, quiet: bool, text_lines: int, system1: str = "KODIAK"):
+        self.color, self.quiet, self.text_lines, self.system1 = color, quiet, text_lines, system1
 
     def c(self, text: str, code: str) -> str:
         return f"\033[{code}m{text}\033[0m" if self.color else text
@@ -393,14 +454,14 @@ class View:
         if self.quiet:
             return
         who = rec["chooser"]
-        tag = {"kodiak": self.c("KODIAK", "1;32"), "explore": self.c("EXPLORE", "1;33"),
+        tag = {"kodiak": self.c(self.system1, "1;32"), "explore": self.c("EXPLORE", "1;33"),
                "llm": self.c("LLM", "1;35"), "forced": self.c("FORCED", "1;36")}.get(who, who.upper())
         k = rec.get("kodiak")
         kinfo = ""
         if k:
             f = k["final"]
             conf = f"conf {f['confidence']:.2f}" if f["answer"] is not None else f"abstained ({f['abstain_reason']})"
-            kinfo = f"  kodiak: {conf}, pick {f['answer'] or '-'!s}, {k['model_ms']:.0f} ms model / {k['roundtrip_ms']:.0f} ms total"
+            kinfo = f"  model: {conf}, pick {f['answer'] or '-'!s}, {k['model_ms']:.0f} ms model / {k['roundtrip_ms']:.0f} ms total"
             if k["rounds"] and len(k["rounds"]) > 1:
                 kinfo += f", tournament of {rec['n_candidates']}"
             d = k.get("danger")
@@ -436,6 +497,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--max-repeats", type=int, default=2,
                     help="skip a command already tried this many times in the same room, when alternatives exist")
     ap.add_argument("--kodiak-url", default=os.environ.get("KODIAK_URL", "http://127.0.0.1:8765"))
+    ap.add_argument("--backend", choices=["kodiak", "jev"], default="kodiak",
+                    help="System 1 model: Kodiak (server.py or --in-process) or TypeSafe's Jev API (for comparison)")
+    ap.add_argument("--jev-model", default="jev-latest")
+    ap.add_argument("--env-file", default=None, help="load KEY=VALUE lines (e.g. the Jev key) into the environment")
     ap.add_argument("--in-process", action="store_true", help="load Kodiak in this process instead of calling server.py")
     ap.add_argument("--model", default="cortex-agent-llc/kodiak-small-r1-preview", help="for --in-process")
     ap.add_argument("--device", default="cpu", help="for --in-process: cpu, cuda or auto (default cpu)")
@@ -461,12 +526,17 @@ def parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None) -> dict:
     a = parse_args(argv)
     warnings.filterwarnings("ignore", module="jericho")
-    view = View(color=sys.stdout.isatty() and not a.no_color, quiet=a.quiet, text_lines=a.text_lines)
+    view = View(color=sys.stdout.isatty() and not a.no_color, quiet=a.quiet, text_lines=a.text_lines,
+                system1="JEV" if a.backend == "jev" else "KODIAK")
     rng = random.Random(a.seed)
     count_tokens = token_counter()
 
+    if a.env_file:
+        load_env_file(a.env_file)
     if a.baseline:
         kodiak = None
+    elif a.backend == "jev":
+        kodiak = JevHTTP(a.jev_model)
     else:
         kodiak = KodiakLocal(a.model, a.device, a.threads) if a.in_process else KodiakHTTP(a.kodiak_url)
     model_name = "none (baseline: exploration only)" if kodiak is None else kodiak.name
@@ -603,6 +673,7 @@ def main(argv=None) -> dict:
     summary = {
         "game": game, "model": model_name, "threshold": a.threshold, "seed": a.seed,
         "system2": f"llm:{a.llm_model}" if a.llm_model else "exploration",
+        "api_usage": dict(kodiak.usage) if isinstance(kodiak, JevHTTP) else None,
         "harness": HARNESS_VERSION, "question": a.question, "max_repeats": a.max_repeats,
         "moves": moves, "episodes": episodes, "game_overs": stats["game_overs"],
         "score": {"start": start_score, "final": score, "best": best_score, "max_possible": max_score},
@@ -638,14 +709,14 @@ def print_summary(s: dict, view: View) -> None:
     sc = s["score"]
     print(f"score           {sc['final']} final, {sc['best']} best, started at {sc['start']} (max {sc['max_possible']})")
     print(f"rooms visited   {s['rooms_visited']}")
-    print(f"decided by      Kodiak {d['kodiak']['moves']} ({d['kodiak']['pct']}%)  |  exploration {d['explore']['moves']} "
+    print(f"decided by      model {d['kodiak']['moves']} ({d['kodiak']['pct']}%)  |  exploration {d['explore']['moves']} "
           f"({d['explore']['pct']}%)  |  LLM {d['llm']['moves']} ({d['llm']['pct']}%)  |  forced {d['forced']['moves']} "
           f"({d['forced']['pct']}%)")
     ab = s["kodiak_abstentions"]
-    print(f"kodiak          asked {s['kodiak_asked']}x, abstained {ab['total']}x (unanswerable {ab['unanswerable']}), "
+    print(f"model           asked {s['kodiak_asked']}x, abstained {ab['total']}x (unanswerable {ab['unanswerable']}), "
           f"below threshold {s['kodiak_below_threshold']}x")
     if lat["model_avg"] is not None:
-        print(f"kodiak latency  {lat['model_avg']} ms model avg, {lat['roundtrip_avg']} ms round trip avg "
+        print(f"model latency   {lat['model_avg']} ms model avg, {lat['roundtrip_avg']} ms round trip avg "
               f"(p50 {lat['roundtrip_p50']} ms)")
     if s["llm_latency_ms_avg"] is not None:
         print(f"llm latency     {s['llm_latency_ms_avg']} ms avg (p50 {s['llm_latency_ms_p50']} ms), "
