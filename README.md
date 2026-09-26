@@ -14,6 +14,8 @@ What the demo shows:
    goes to a fallback: exploration, or a local LLM. Every run reports what share of moves each part made.
 4. **An honest benchmark.** The same games and seeds, with and without the model, so a new Kodiak version can be compared
    against this one and against a no-model baseline.
+5. **A head-to-head with Jev**, TypeSafe AI's closed System One model, through its API on the same harness
+   (see [Kodiak vs Jev](#kodiak-vs-jev-zork-i)): Jev picks far better moves on Zork I, but walks into the grue.
 
 **Set expectations.** Kodiak is a *public research preview*, and the benchmark says plainly how it plays. With harness v1,
 the r1 preview clearly helps on one game (Detective), roughly ties on three, and **hurts on Zork I** compared with
