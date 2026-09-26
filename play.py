@@ -117,11 +117,64 @@ def peek(env: FrotzEnv, command: str) -> str:
     return clean(obs)
 
 
-def valid_actions(env: FrotzEnv) -> list[str]:
-    """Jericho's valid-action search, serial. Some commands halt the emulator (e.g. "drop all down nest" at one point
-    in Zork I); the serial search recovers from that, while Jericho's parallel search can hang or crash on it. Serial
-    costs ~0.05 s per turn."""
-    return env.get_valid_actions(use_parallel=False)
+def _search_in_child(env: FrotzEnv, blocked: set[str], trace: bool) -> tuple[list[str] | None, str | None]:
+    """Run Jericho's valid-action search in a forked child, so an emulator crash can't take the game down.
+
+    Returns (actions, None) on success, or (None, last command tried) if the child crashed. With `trace`, the child
+    uses Jericho's pure-Python search, reports each command before trying it, and skips the `blocked` ones.
+    """
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # child: never returns
+        os.close(r)
+        out = os.fdopen(w, "w")
+        try:
+            if trace:
+                real_step = env.step
+
+                def step(act):
+                    out.write(json.dumps({"try": act}) + "\n")
+                    out.flush()
+                    if act in blocked:  # not stepping leaves the world unchanged, so Jericho drops it
+                        return "", 0, False, {"score": env.get_score(), "moves": env.get_moves()}
+                    return real_step(act)
+
+                env.step = step
+                acts = env.get_valid_actions(use_ctypes=False, use_parallel=False)
+            else:
+                acts = env.get_valid_actions(use_parallel=False)
+            out.write(json.dumps({"valid": acts}) + "\n")
+            out.flush()
+        finally:
+            os._exit(0)
+    os.close(w)
+    last_try, acts = None, None
+    with os.fdopen(r) as inp:
+        for line in inp:
+            msg = json.loads(line)
+            last_try = msg.get("try", last_try)
+            acts = msg.get("valid", acts)
+    os.waitpid(pid, 0)
+    return (acts, None) if acts is not None else (None, last_try)
+
+
+def valid_actions(env: FrotzEnv, blocked: set[str]) -> tuple[list[str], list[str]]:
+    """Jericho's valid actions, protected against commands that crash the emulator. Returns (actions, newly blocked).
+
+    Some commands crash Frotz in some states (e.g. "drop all down nest" while the nest is inside the egg you carry, in
+    Zork I), which kills the process in any of Jericho's search modes. The search runs in a forked child; if the child
+    dies, it's rerun with a trace to find the command, which is blocked for the rest of the game and then skipped.
+    """
+    acts, _ = _search_in_child(env, blocked, trace=False)
+    new: list[str] = []
+    while acts is None:
+        acts, culprit = _search_in_child(env, blocked, trace=True)
+        if acts is None:
+            if culprit is None or culprit in blocked or len(new) > 20:
+                return [], new  # give up this turn; the loop falls back to "look"
+            blocked.add(culprit)
+            new.append(culprit)
+    return [a for a in acts if a not in blocked], new
 
 
 def location(env: FrotzEnv) -> tuple[int, str]:
@@ -423,7 +476,9 @@ def main(argv=None) -> dict:
     if not env.is_fully_supported or not env.bindings:
         sys.exit(f"{a.game} is not a Jericho-supported build (unknown md5), so there is no valid-action list. "
                  "See the README's 'Game files' section.")
-    obs, info = env.reset()
+    env.reset()
+    env.get_valid_actions(use_parallel=False)  # one-time setup (~1.5 s), so the forked searches inherit it warm
+    obs, info = env.reset()  # and start from a clean game
     game = Path(a.game).stem
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     transcript = Path(a.transcript or Path(a.out) / f"{game}-{stamp}.jsonl")
@@ -437,6 +492,7 @@ def main(argv=None) -> dict:
     history: deque = deque(maxlen=3)
     tried: dict[int, Counter] = {}  # room -> command counts
     tried_state: dict[str, Counter] = {}  # exact world state -> command counts
+    blocked: set[str] = set()  # commands that crashed the emulator while Jericho tested them
     rooms: set[str] = set()
     stats = Counter()
     k_model_ms, k_rt_ms, llm_ms = [], [], []
@@ -453,7 +509,9 @@ def main(argv=None) -> dict:
             situation = tried_state.setdefault(env.get_world_state_hash(), Counter())
             look = peek(env, "look")
             inv = inventory_text(env)
-            valid = valid_actions(env)
+            valid, newly_blocked = valid_actions(env, blocked)
+            if newly_blocked:
+                stats["crash_commands_blocked"] += len(newly_blocked)
             all_cands = candidates_from(valid)
             cands = anti_loop(all_cands, here, situation, a.max_repeats)
             undo = undo_of(prev_cmd) if prev_cmd else set()
@@ -469,7 +527,7 @@ def main(argv=None) -> dict:
             rec: dict = {"turn": turn, "episode": episodes, "location": loc_name, "location_id": loc_id,
                          "score_before": score, "state": state, "state_tokens": n_tokens,
                          "valid_actions": valid, "candidates": cands, "n_candidates": len(cands),
-                         "skipped": [c for c in all_cands if c not in cands]}
+                         "skipped": [c for c in all_cands if c not in cands], "newly_blocked": newly_blocked}
 
             if not cands:  # no valid action found at all (rare): "look" is always accepted by the parser
                 cmd, chooser, reason = "look", "forced", "no valid actions listed"
@@ -561,6 +619,7 @@ def main(argv=None) -> dict:
         "llm_latency_ms_p50": round(sorted(llm_ms)[len(llm_ms) // 2], 1) if llm_ms else None,
         "llm_errors": stats["llm_errors"],
         "invalid_commands": stats["invalid"],
+        "crash_commands_blocked": sorted(blocked),
         "transcript": str(transcript),
     }
     summary_path = transcript.with_name(transcript.stem + "-summary.json")
